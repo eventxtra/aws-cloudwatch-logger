@@ -8,6 +8,7 @@
 
 const axios = require('axios')
 const aws4  = require('aws4')
+const crypto = require('crypto')
 
 const getRequestParams = (method, region, payload, keys={}) => {
 	if (!region)
@@ -197,47 +198,44 @@ const splitMessageIfNeeded = (
 	messages,
 	threshold = 256 * 1000,
 ) => {
-	const result = [];
-	for (const message of messages) {
+	const result = messages.flatMap(message => {
 		if (message.length < threshold) {
-			result.push(message);
-			continue;
+			return [message];
 		}
-
-		const messageId = randomUUID();
+		const messageId = crypto.randomUUID();
 		const chunks = [];
-		for (let i = 0; message.length; i++) {
-			chunks.push({
+		for (let i = 0, partNo = 0; i < message.length; i += threshold, partNo++) {
+			chunks.push(JSON.stringify({
 				messageId,
-				partNo: i,
-				part: message.slice(i * threshold, (i + 1) * threshold),
-			});
+				partNo,
+				part: message.slice(i, i + threshold),
+			}));
 		}
-
-		result.push(...chunks);
-	}
-
+		return chunks;
+	});
+	console.log('[splitMessageIfNeeded]', messages.map(x => x.length), result.map(x => x.length))
 	return result;
 }
 
 /**
  * ref: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/cloudwatch_limits_cwl.html
- * @param {string[]} logs 
+ * @param {string[] | Array<{ message: string, timestamp: number }>} logs 
  * @param {number} threshold 
- * @returns {string[][]}
+ * @returns {Array<string[] | Array<{ message: string, timestamp: number }>>}
  */
-const splitLogChunks = (logs, threshold = 1024 * 1024) => {
+const splitLogChunks = (logs, threshold = 1024 * 1000) => {
 	const result = [];
 	while (logs.length) {
 		const chunk = [];
 		let size = 0;
-		while (logs.length && size + logs[0].length < threshold) {
+		while (logs.length && (typeof logs[0] === 'string' ? size + logs[0].length : size + logs[0].message.length) < threshold) {
 			const log = logs.shift();
 			chunk.push(log);
 			size += log.length;
 		}
 		result.push(chunk);
 	}
+	console.log('[splitLogChunks]', logs.map(x => typeof x), logs.map(x => typeof x === 'string' ? x.length : x.message.length), result.map(x => x.length))
 	return result;
 }
 
@@ -260,9 +258,9 @@ const Logger = class {
 		let log
 		if (!uploadFreq || uploadFreq < 0) {
 			log = (...args) => {
-				const logs = (args || []).map(x => JSON.stringify(x))
-				const splittedLogs = splitMessageIfNeeded(logs)
-				const logChunks = splitLogChunks(splittedLogs)
+				const messages = (args || []).map(x => JSON.stringify(x))
+				const splittedMessages = splitMessageIfNeeded(messages)
+				const logChunks = splitLogChunks(splittedMessages)
 				// console.log('Logging now...')
 				// console.log(logs)
 				for (const logChunk of logChunks) {
@@ -274,10 +272,11 @@ const Logger = class {
 			log = (...args) => {
 			// 1. Accumulate all logs
 				const now = Date.now()
-				const logs = (args || []).map(x => ({ message: JSON.stringify(x), timestamp: now }))
-				const splittedLogs = splitMessageIfNeeded(logs)
+				const messages = (args || []).map(x => JSON.stringify(x))
+				const splittedMessages = splitMessageIfNeeded(messages)
+				const logs = splittedMessages.map(x => ({ message: x, timestamp: now }))
 				let latestBuffer = (_logbuffer.get(this) || { latest: now, data: [], job: null })
-				latestBuffer.data = latestBuffer.data.concat(splittedLogs)
+				latestBuffer.data = latestBuffer.data.concat(logs)
 
 				// 2. If no job has ever been started, start it, or if the job is ready to process more
 				if (!latestBuffer.job || !latestBuffer.job.isPending()) {
