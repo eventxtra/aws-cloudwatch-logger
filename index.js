@@ -198,7 +198,7 @@ const splitMessageIfNeeded = (
 	messages,
 	threshold = 256 * 1000,
 ) => {
-	const result = messages.flatMap(message => {
+	return messages.flatMap(message => {
 		if (message.length < threshold) {
 			return [message];
 		}
@@ -213,7 +213,6 @@ const splitMessageIfNeeded = (
 		}
 		return chunks;
 	});
-	return result;
 }
 
 /**
