@@ -187,6 +187,60 @@ const makeQuerablePromise = promise => {
 	return result
 }
 
+/**
+ * ref: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/cloudwatch_limits_cwl.html
+ * @param {string[]} messages
+ * @param {number} threshold
+ * @returns {string[]}
+ */
+const splitMessageIfNeeded = (
+	messages,
+	threshold = 256 * 1000,
+) => {
+	const result = [];
+	for (const message of messages) {
+		if (message.length < threshold) {
+			result.push(message);
+			continue;
+		}
+
+		const messageId = randomUUID();
+		const chunks = [];
+		for (let i = 0; message.length; i++) {
+			chunks.push({
+				messageId,
+				partNo: i,
+				part: message.slice(i * threshold, (i + 1) * threshold),
+			});
+		}
+
+		result.push(...chunks);
+	}
+
+	return result;
+}
+
+/**
+ * ref: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/cloudwatch_limits_cwl.html
+ * @param {string[]} logs 
+ * @param {number} threshold 
+ * @returns {string[][]}
+ */
+const splitLogChunks = (logs, threshold = 1024 * 1024) => {
+	const result = [];
+	while (logs.length) {
+		const chunk = [];
+		let size = 0;
+		while (logs.length && size + logs[0].length < threshold) {
+			const log = logs.shift();
+			chunk.push(log);
+			size += log.length;
+		}
+		result.push(chunk);
+	}
+	return result;
+}
+
 const _logbuffer = new WeakMap()
 const Logger = class {
 	constructor({ logGroupName, logStreamName, region, accessKeyId, secretAccessKey, uploadFreq, local }) {
@@ -207,9 +261,13 @@ const Logger = class {
 		if (!uploadFreq || uploadFreq < 0) {
 			log = (...args) => {
 				const logs = (args || []).map(x => JSON.stringify(x))
+				const splittedLogs = splitMessageIfNeeded(logs)
+				const logChunks = splitLogChunks(splittedLogs)
 				// console.log('Logging now...')
 				// console.log(logs)
-				addLogsToStream(logs, logGroupName, logStreamName, region, keys)
+				for (const logChunk of logChunks) {
+					addLogsToStream(logChunk, logGroupName, logStreamName, region, keys)
+				}
 			}
 		}
 		else {
@@ -217,8 +275,9 @@ const Logger = class {
 			// 1. Accumulate all logs
 				const now = Date.now()
 				const logs = (args || []).map(x => ({ message: JSON.stringify(x), timestamp: now }))
+				const splittedLogs = splitMessageIfNeeded(logs)
 				let latestBuffer = (_logbuffer.get(this) || { latest: now, data: [], job: null })
-				latestBuffer.data = latestBuffer.data.concat(logs)
+				latestBuffer.data = latestBuffer.data.concat(splittedLogs)
 
 				// 2. If no job has ever been started, start it, or if the job is ready to process more
 				if (!latestBuffer.job || !latestBuffer.job.isPending()) {
@@ -227,7 +286,10 @@ const Logger = class {
 						// console.log('Finally logging now...')
 						// console.log(data)
 						_logbuffer.set(this, { latest, data:[], job })
-						addLogsToStream(data, logGroupName, logStreamName, region, keys)
+						const logChunks = splitLogChunks(data)
+						for (const logChunk of logChunks) {
+							addLogsToStream(logChunk, logGroupName, logStreamName, region, keys)
+						}
 					}, uploadFreq))
 				}
 				//console.log('Buffering logs now...')
