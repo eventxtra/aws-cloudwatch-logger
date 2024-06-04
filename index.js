@@ -8,6 +8,7 @@
 
 const axios = require('axios')
 const aws4  = require('aws4')
+const crypto = require('crypto')
 
 const getRequestParams = (method, region, payload, keys={}) => {
 	if (!region)
@@ -187,6 +188,54 @@ const makeQuerablePromise = promise => {
 	return result
 }
 
+/**
+ * ref: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/cloudwatch_limits_cwl.html
+ * @param {string[]} messages
+ * @param {number} threshold
+ * @returns {string[]}
+ */
+const splitMessageIfNeeded = (
+	messages,
+	threshold = 256 * 1000,
+) => {
+	return messages.flatMap(message => {
+		if (message.length < threshold) {
+			return [message];
+		}
+		const messageId = crypto.randomUUID();
+		const chunks = [];
+		for (let i = 0, partNo = 0; i < message.length; i += threshold, partNo++) {
+			chunks.push(JSON.stringify({
+				messageId,
+				partNo,
+				part: message.slice(i, i + threshold),
+			}));
+		}
+		return chunks;
+	});
+}
+
+/**
+ * ref: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/cloudwatch_limits_cwl.html
+ * @param {string[] | Array<{ message: string, timestamp: number }>} logs 
+ * @param {number} threshold 
+ * @returns {Array<string[] | Array<{ message: string, timestamp: number }>>}
+ */
+const splitLogChunks = (logs, threshold = 1024 * 1000) => {
+	const result = [];
+	while (logs.length) {
+		const chunk = [];
+		let size = 0;
+		while (logs.length && (typeof logs[0] === 'string' ? size + logs[0].length : size + logs[0].message.length) < threshold) {
+			const log = logs.shift();
+			chunk.push(log);
+			size += typeof log === 'string' ? log.length : log.message.length;
+		}
+		result.push(chunk);
+	}
+	return result;
+}
+
 const _logbuffer = new WeakMap()
 const Logger = class {
 	constructor({ logGroupName, logStreamName, region, accessKeyId, secretAccessKey, uploadFreq, local }) {
@@ -206,17 +255,23 @@ const Logger = class {
 		let log
 		if (!uploadFreq || uploadFreq < 0) {
 			log = (...args) => {
-				const logs = (args || []).map(x => JSON.stringify(x))
+				const messages = (args || []).map(x => JSON.stringify(x))
+				const splittedMessages = splitMessageIfNeeded(messages)
+				const logChunks = splitLogChunks(splittedMessages)
 				// console.log('Logging now...')
 				// console.log(logs)
-				addLogsToStream(logs, logGroupName, logStreamName, region, keys)
+				for (const logChunk of logChunks) {
+					addLogsToStream(logChunk, logGroupName, logStreamName, region, keys)
+				}
 			}
 		}
 		else {
 			log = (...args) => {
 			// 1. Accumulate all logs
 				const now = Date.now()
-				const logs = (args || []).map(x => ({ message: JSON.stringify(x), timestamp: now }))
+				const messages = (args || []).map(x => JSON.stringify(x))
+				const splittedMessages = splitMessageIfNeeded(messages)
+				const logs = splittedMessages.map(x => ({ message: x, timestamp: now }))
 				let latestBuffer = (_logbuffer.get(this) || { latest: now, data: [], job: null })
 				latestBuffer.data = latestBuffer.data.concat(logs)
 
@@ -227,7 +282,10 @@ const Logger = class {
 						// console.log('Finally logging now...')
 						// console.log(data)
 						_logbuffer.set(this, { latest, data:[], job })
-						addLogsToStream(data, logGroupName, logStreamName, region, keys)
+						const logChunks = splitLogChunks(data)
+						for (const logChunk of logChunks) {
+							addLogsToStream(logChunk, logGroupName, logStreamName, region, keys)
+						}
 					}, uploadFreq))
 				}
 				//console.log('Buffering logs now...')
