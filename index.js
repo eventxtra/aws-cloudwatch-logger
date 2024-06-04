@@ -213,7 +213,6 @@ const splitMessageIfNeeded = (
 		}
 		return chunks;
 	});
-	console.log('[splitMessageIfNeeded]', messages.map(x => x.length), result.map(x => x.length))
 	return result;
 }
 
@@ -231,11 +230,10 @@ const splitLogChunks = (logs, threshold = 1024 * 1000) => {
 		while (logs.length && (typeof logs[0] === 'string' ? size + logs[0].length : size + logs[0].message.length) < threshold) {
 			const log = logs.shift();
 			chunk.push(log);
-			size += log.length;
+			size += typeof log === 'string' ? log.length : log.message.length;
 		}
 		result.push(chunk);
 	}
-	console.log('[splitLogChunks]', logs.map(x => typeof x), logs.map(x => typeof x === 'string' ? x.length : x.message.length), result.map(x => x.length))
 	return result;
 }
 
